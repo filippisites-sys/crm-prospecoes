@@ -34,6 +34,30 @@ COLUMNS = [
 # Índices das colunas editáveis (0-based) — nunca tocar em G(6), J(9), K(10), L(11)
 EDITABLE_COLS = [0, 1, 2, 3, 4, 5, 7, 8]  # A, B, C, D, E, F, H, I
 
+
+import re
+from datetime import datetime
+
+def normalize_date(val):
+    """Converte dd/mm ou yyyy-mm-dd para dd/mm/yyyy que o Sheets entende."""
+    if not val:
+        return val
+    val = val.strip()
+    # yyyy-mm-dd (vem do input date do browser)
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})$', val)
+    if m:
+        yyyy, mm, dd = m.groups()
+        return f"{dd}/{mm}/{yyyy}"
+    # dd/mm sem ano
+    m = re.match(r'^(\d{1,2})/(\d{1,2})$', val)
+    if m:
+        dd, mm = m.groups()
+        return f"{dd.zfill(2)}/{mm.zfill(2)}/{datetime.now().year}"
+    # dd/mm/yyyy já correto
+    if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', val):
+        return val
+    return val
+
 def get_sheet():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     if not creds_json:
@@ -100,7 +124,12 @@ def add_prospecto():
 
         # Insere logo abaixo da última linha com e-mail
         insert_at = last_row_with_email + 1
-        row_data = [data.get(col, "") for col in COLUMNS]
+        row_data = []
+        for col in COLUMNS:
+            val = data.get(col, "")
+            if col == "Data da abordagem" and val:
+                val = normalize_date(val)
+            row_data.append(val)
 
         sheet.insert_row(
             row_data,
@@ -119,7 +148,11 @@ def update_prospecto(sheet_row):
         sheet = get_sheet()
         for i, col in enumerate(COLUMNS):
             if col in data and i in EDITABLE_COLS:
-                sheet.update_cell(sheet_row, i + 1, data[col])
+                val = data[col]
+                # Normaliza data de abordagem: "20/02" -> "20/02/2026"
+                if col == "Data da abordagem" and val:
+                    val = normalize_date(val)
+                sheet.update_cell(sheet_row, i + 1, val)
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
