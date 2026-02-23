@@ -12,18 +12,23 @@ app = Flask(__name__)
 CORS(app)
 
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1CJER2qjZhMXx2r0rLBU-lrGW0EsIqRTWM2E11Z7pPl4")
-SHEET_NAME = os.environ.get("SHEET_NAME", "Sheet1")
+SHEET_NAME = os.environ.get("SHEET_NAME", "PLANILHA CENTRAL")
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
+# Colunas na ordem exata da planilha
 COLUMNS = [
     "Gênero", "Nome", "Escritório", "E-mail", "Cidade",
     "Data da abordagem", "Próximo Follow-up", "Status",
     "Observações", "Follow-up 1", "Follow-up 2", "Follow-up 3 (Break-up)"
 ]
+
+# Índices das colunas editáveis manualmente (0-based)
+# A=Gênero, B=Nome, C=Escritório, D=E-mail, E=Cidade, F=Data abordagem, H=Status, I=Observações
+EDITABLE_COLS = [0, 1, 2, 3, 4, 5, 7, 8]  # A, B, C, D, E, F, H, I
 
 def get_sheet():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
@@ -52,20 +57,15 @@ def get_prospectos():
             return jsonify({"data": [], "total": 0})
         headers = all_values[0]
         records = []
-        for row in all_values[1:]:
+        for idx, row in enumerate(all_values[1:]):
             if not any(cell.strip() for cell in row):
                 continue
-            record = {}
-            seen = {}
+            # Garante que a row tem tamanho suficiente
+            while len(row) < len(headers):
+                row.append("")
+            record = {"_row": idx + 2}  # linha real no Sheets (1-based + header)
             for i, header in enumerate(headers):
-                value = row[i] if i < len(row) else ""
-                if header in seen:
-                    seen[header] += 1
-                    key = f"{header}_{seen[header]}"
-                else:
-                    seen[header] = 0
-                    key = header
-                record[key] = value
+                record[header] = row[i] if i < len(row) else ""
             records.append(record)
         return jsonify({"data": records, "total": len(records)})
     except Exception as e:
@@ -77,31 +77,29 @@ def add_prospecto():
         data = request.get_json()
         sheet = get_sheet()
         row = [data.get(col, "") for col in COLUMNS]
-        sheet.append_row(row)
-        return jsonify({"success": True, "message": "Prospecto adicionado!"})
+        sheet.append_row(row, value_input_option="USER_ENTERED")
+        return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/prospectos/<int:row_index>", methods=["PUT"])
-def update_prospecto(row_index):
+@app.route("/prospectos/<int:sheet_row>", methods=["PUT"])
+def update_prospecto(sheet_row):
     try:
         data = request.get_json()
         sheet = get_sheet()
-        sheet_row = row_index + 2
         for i, col in enumerate(COLUMNS):
-            if col in data:
+            if col in data and i in EDITABLE_COLS:
                 sheet.update_cell(sheet_row, i + 1, data[col])
-        return jsonify({"success": True, "message": "Prospecto atualizado!"})
+        return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/prospectos/<int:row_index>", methods=["DELETE"])
-def delete_prospecto(row_index):
+@app.route("/prospectos/<int:sheet_row>", methods=["DELETE"])
+def delete_prospecto(sheet_row):
     try:
         sheet = get_sheet()
-        sheet_row = row_index + 2
         sheet.delete_rows(sheet_row)
-        return jsonify({"success": True, "message": "Prospecto removido!"})
+        return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
