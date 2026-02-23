@@ -207,3 +207,105 @@ def delete_prospecto(sheet_row):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
+# ══ VÍDEOS ENVIADOS ══
+VIDEO_SHEET_NAME = os.environ.get("VIDEO_SHEET_NAME", "VÍDEOS ENVIADOS")
+# A=Nome, B=E-mail, C=Vídeo enviado no dia, D=Demonstração, E=Status, F-J=Follow-ups
+VIDEO_COLUMNS = [
+    "Nome", "E-mail", "Vídeo enviado no dia", "Demonstração",
+    "Status", "Follow-up 1", "Follow-up 2", "Follow-up 3", "Follow-up 4", "Follow-up 5"
+]
+VIDEO_EDITABLE_COLS = [0, 1, 2, 3, 4]  # Nome, E-mail, Data, Demo, Status
+VIDEO_DATE_COL = 2  # Coluna C
+
+def get_video_sheet():
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if not creds_json:
+        raise Exception("GOOGLE_CREDENTIALS não configurado")
+    creds_dict = json.loads(creds_json)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    return spreadsheet.worksheet(VIDEO_SHEET_NAME)
+
+@app.route("/videos", methods=["GET"])
+def get_videos():
+    try:
+        sheet = get_video_sheet()
+        all_formatted = sheet.get_all_values(value_render_option=ValueRenderOption.formatted)
+        all_unformatted = sheet.get_all_values(value_render_option=ValueRenderOption.unformatted)
+        if not all_formatted:
+            return jsonify({"data": [], "total": 0})
+        headers = [' '.join(h.replace('\r','').split()) for h in all_formatted[0]]
+        records = []
+        for idx, row in enumerate(all_formatted[1:]):
+            if not any(cell.strip() for cell in row):
+                continue
+            while len(row) < len(headers):
+                row.append("")
+            record = {"_row": idx + 2}
+            for i, header in enumerate(headers):
+                val = row[i] if i < len(row) else ""
+                if i == VIDEO_DATE_COL:
+                    unf_row = all_unformatted[idx + 1] if idx + 1 < len(all_unformatted) else []
+                    unf_val = unf_row[i] if i < len(unf_row) else ""
+                    if unf_val and str(unf_val).replace('.','').replace('-','').isdigit():
+                        converted = sheets_serial_to_date(unf_val)
+                        val = converted if converted else val
+                record[header] = val
+            records.append(record)
+        return jsonify({"data": records, "total": len(records)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/videos", methods=["POST"])
+def add_video():
+    try:
+        data = request.get_json()
+        sheet = get_video_sheet()
+        all_values = sheet.get_all_values(value_render_option=ValueRenderOption.formatted)
+        last_row = 1
+        for idx, row in enumerate(all_values):
+            if idx == 0: continue
+            if any(cell.strip() for cell in row):
+                last_row = idx + 1
+        insert_at = last_row + 1
+        row_data = []
+        for col in VIDEO_COLUMNS:
+            val = data.get(col, "")
+            if col == "Vídeo enviado no dia" and val:
+                val = normalize_date(val)
+            row_data.append(val)
+        sheet.insert_row(row_data, index=insert_at, value_input_option=ValueInputOption.user_entered)
+        return jsonify({"success": True, "inserted_at": insert_at})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/videos/<int:sheet_row>", methods=["PUT"])
+def update_video(sheet_row):
+    try:
+        data = request.get_json()
+        sheet = get_video_sheet()
+        headers_row = sheet.row_values(1)
+        headers = [' '.join(h.replace('\r','').split()) for h in headers_row]
+        for field, val in data.items():
+            if field == '_row': continue
+            if field == "Vídeo enviado no dia" and val:
+                val = normalize_date(val)
+            try:
+                col_idx = headers.index(field)
+                sheet.update_cell(sheet_row, col_idx + 1, val)
+            except ValueError:
+                pass
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/videos/<int:sheet_row>", methods=["DELETE"])
+def delete_video(sheet_row):
+    try:
+        sheet = get_video_sheet()
+        sheet.delete_rows(sheet_row)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
