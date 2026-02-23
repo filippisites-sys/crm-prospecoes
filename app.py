@@ -47,7 +47,26 @@ def health():
 def get_prospectos():
     try:
         sheet = get_sheet()
-        records = sheet.get_all_records()
+        all_values = sheet.get_all_values()
+        if not all_values:
+            return jsonify({"data": [], "total": 0})
+        headers = all_values[0]
+        records = []
+        for row in all_values[1:]:
+            if not any(cell.strip() for cell in row):
+                continue
+            record = {}
+            seen = {}
+            for i, header in enumerate(headers):
+                value = row[i] if i < len(row) else ""
+                if header in seen:
+                    seen[header] += 1
+                    key = f"{header}_{seen[header]}"
+                else:
+                    seen[header] = 0
+                    key = header
+                record[key] = value
+            records.append(record)
         return jsonify({"data": records, "total": len(records)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -68,7 +87,6 @@ def update_prospecto(row_index):
     try:
         data = request.get_json()
         sheet = get_sheet()
-        # row_index é baseado nos dados (sem header), então +2 para offset do Sheets
         sheet_row = row_index + 2
         for i, col in enumerate(COLUMNS):
             if col in data:
