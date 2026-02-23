@@ -236,7 +236,7 @@ def get_videos():
         all_unformatted = sheet.get_all_values(value_render_option=ValueRenderOption.unformatted)
         if not all_formatted:
             return jsonify({"data": [], "total": 0})
-        headers = [' '.join(h.replace('\r','').split()) for h in all_formatted[0]]
+        headers = [' '.join(h.replace('\r','').split()).rstrip(':') for h in all_formatted[0]]
         records = []
         for idx, row in enumerate(all_formatted[1:]):
             if not any(cell.strip() for cell in row):
