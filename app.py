@@ -76,28 +76,66 @@ def get_sheet():
 def health():
     return jsonify({"status": "ok"})
 
+def sheets_serial_to_date(serial):
+    """Converte número serial do Google Sheets para dd/mm/yyyy.
+    O Sheets usa epoch 30/12/1899. Serial 1 = 01/01/1900.
+    Para converter para data real: subtrair 25569 dias do epoch Unix (01/01/1970).
+    """
+    try:
+        n = float(serial)
+        if n < 1:
+            return None
+        import datetime
+        # Ajuste: 25569 = dias entre 30/12/1899 e 01/01/1970
+        # Além disso o Sheets tem o bug do 29/02/1900, então para datas > 60: subtrair 1
+        delta = datetime.timedelta(days=n - 2)  # -2 corrige epoch + bug 1900
+        base = datetime.date(1899, 12, 30)
+        d = base + delta
+        return d.strftime("%d/%m/%Y")
+    except:
+        return None
+
 @app.route("/prospectos", methods=["GET"])
 def get_prospectos():
     try:
         sheet = get_sheet()
-        # FORMATTED_VALUE garante que fórmulas retornam o valor calculado
-        # ex: coluna G com =SE(...) retorna "06/02/2026" e não a fórmula em si
-        all_values = sheet.get_all_values(
+        # FORMATTED_VALUE: fórmulas retornam valor calculado (ex: "05/02")
+        # mas datas formatadas como "dd/mm" retornam sem o ano ("26/01")
+        all_formatted = sheet.get_all_values(
             value_render_option=ValueRenderOption.formatted
         )
-        if not all_values:
+        # UNFORMATTED_VALUE: datas retornam como número serial (ex: 46678)
+        # isso nos permite reconstruir a data completa com o ano
+        all_unformatted = sheet.get_all_values(
+            value_render_option=ValueRenderOption.unformatted
+        )
+
+        if not all_formatted:
             return jsonify({"data": [], "total": 0})
 
-        headers = all_values[0]
+        headers = all_formatted[0]
+        # Índice da coluna F (Data da abordagem) = 5 (0-based)
+        DATE_COL = 5
+
         records = []
-        for idx, row in enumerate(all_values[1:]):
+        for idx, row in enumerate(all_formatted[1:]):
             if not any(cell.strip() for cell in row):
                 continue
             while len(row) < len(headers):
                 row.append("")
             record = {"_row": idx + 2}
             for i, header in enumerate(headers):
-                record[header] = row[i] if i < len(row) else ""
+                val = row[i] if i < len(row) else ""
+                # Para coluna de data: usar valor unformatted (serial) e converter
+                if i == DATE_COL:
+                    unf_row = all_unformatted[idx + 1] if idx + 1 < len(all_unformatted) else []
+                    unf_val = unf_row[i] if i < len(unf_row) else ""
+                    # unf_val é um número serial se for data
+                    if unf_val and str(unf_val).replace('.','').replace('-','').isdigit():
+                        converted = sheets_serial_to_date(unf_val)
+                        val = converted if converted else val
+                    # se já vier como dd/mm/yyyy ou dd/mm, mantém
+                record[header] = val
             records.append(record)
 
         return jsonify({"data": records, "total": len(records)})
