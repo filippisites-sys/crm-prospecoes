@@ -113,7 +113,8 @@ def get_prospectos():
         if not all_formatted:
             return jsonify({"data": [], "total": 0})
 
-        headers = all_formatted[0]
+        # Normaliza headers: remove \n e espaços extras
+        headers = [' '.join(h.replace('\r','').split()) for h in all_formatted[0]]
         # Índice da coluna F (Data da abordagem) = 5 (0-based)
         DATE_COL = 5
 
