@@ -6,6 +6,7 @@ import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import gspread
+from gspread.utils import ValueRenderOption, ValueInputOption
 from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
@@ -20,14 +21,17 @@ SCOPES = [
 ]
 
 # Colunas na ordem exata da planilha
+# A=Gênero, B=Nome, C=Escritório, D=E-mail, E=Cidade, F=Data abordagem
+# G=Próximo Follow-up (FÓRMULA — só leitura)
+# H=Status, I=Observações
+# J=Follow-up 1 (FÓRMULA), K=Follow-up 2 (FÓRMULA), L=Follow-up 3 (FÓRMULA)
 COLUMNS = [
     "Gênero", "Nome", "Escritório", "E-mail", "Cidade",
     "Data da abordagem", "Próximo Follow-up", "Status",
     "Observações", "Follow-up 1", "Follow-up 2", "Follow-up 3 (Break-up)"
 ]
 
-# Índices das colunas editáveis manualmente (0-based)
-# A=Gênero, B=Nome, C=Escritório, D=E-mail, E=Cidade, F=Data abordagem, H=Status, I=Observações
+# Índices das colunas editáveis (0-based) — nunca tocar em G(6), J(9), K(10), L(11)
 EDITABLE_COLS = [0, 1, 2, 3, 4, 5, 7, 8]  # A, B, C, D, E, F, H, I
 
 def get_sheet():
@@ -40,7 +44,7 @@ def get_sheet():
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
     try:
         sheet = spreadsheet.worksheet(SHEET_NAME)
-    except:
+    except Exception:
         sheet = spreadsheet.get_worksheet(0)
     return sheet
 
@@ -52,21 +56,26 @@ def health():
 def get_prospectos():
     try:
         sheet = get_sheet()
-        all_values = sheet.get_all_values()
+        # FORMATTED_VALUE garante que fórmulas retornam o valor calculado
+        # ex: coluna G com =SE(...) retorna "06/02/2026" e não a fórmula em si
+        all_values = sheet.get_all_values(
+            value_render_option=ValueRenderOption.formatted
+        )
         if not all_values:
             return jsonify({"data": [], "total": 0})
+
         headers = all_values[0]
         records = []
         for idx, row in enumerate(all_values[1:]):
             if not any(cell.strip() for cell in row):
                 continue
-            # Garante que a row tem tamanho suficiente
             while len(row) < len(headers):
                 row.append("")
-            record = {"_row": idx + 2}  # linha real no Sheets (1-based + header)
+            record = {"_row": idx + 2}
             for i, header in enumerate(headers):
                 record[header] = row[i] if i < len(row) else ""
             records.append(record)
+
         return jsonify({"data": records, "total": len(records)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -76,9 +85,30 @@ def add_prospecto():
     try:
         data = request.get_json()
         sheet = get_sheet()
-        row = [data.get(col, "") for col in COLUMNS]
-        sheet.append_row(row, value_input_option="USER_ENTERED")
-        return jsonify({"success": True})
+
+        # Descobre a última linha que tem e-mail preenchido (coluna D = índice 3)
+        all_values = sheet.get_all_values(
+            value_render_option=ValueRenderOption.formatted
+        )
+        last_row_with_email = 1  # começa no header
+        for idx, row in enumerate(all_values):
+            if idx == 0:
+                continue  # pula header
+            email_val = row[3] if len(row) > 3 else ""
+            if email_val.strip():
+                last_row_with_email = idx + 1  # 1-based
+
+        # Insere logo abaixo da última linha com e-mail
+        insert_at = last_row_with_email + 1
+        row_data = [data.get(col, "") for col in COLUMNS]
+
+        sheet.insert_row(
+            row_data,
+            index=insert_at,
+            value_input_option=ValueInputOption.user_entered
+        )
+
+        return jsonify({"success": True, "inserted_at": insert_at})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
