@@ -280,19 +280,34 @@ def enviar_email():
         )
 
         if resp.status_code in (200, 201):
-            # Atualiza status do lead na planilha (se informado)
-            status_warning = None
+            from datetime import datetime
+            warnings = []
+
+            # Atualiza status do lead na planilha principal
             if lead_row:
                 try:
                     sheet = get_sheet()
                     status_col_idx = COLUMNS.index("Status") + 1
                     sheet.update_cell(int(lead_row), status_col_idx, "E-mail Enviado")
                 except Exception as e:
-                    status_warning = f"E-mail enviado, mas falhou ao atualizar status: {str(e)}"
+                    warnings.append(f"Falhou ao atualizar status: {str(e)}")
+
+            # Grava na aba E-MAILS ENVIADOS
+            try:
+                email_sheet = get_emails_sheet()
+                data_hora = datetime.now().strftime("%d/%m/%Y %H:%M")
+                nome_lead = data.get("nome_lead") or ""
+                template  = data.get("template") or ""
+                email_sheet.append_row(
+                    [data_hora, remetente_email, para, nome_lead, assunto, corpo, template],
+                    value_input_option=ValueInputOption.user_entered
+                )
+            except Exception as e:
+                warnings.append(f"Falhou ao gravar historico: {str(e)}")
 
             result = {"success": True}
-            if status_warning:
-                result["warning"] = status_warning
+            if warnings:
+                result["warning"] = " | ".join(warnings)
             return jsonify(result)
         else:
             try:
@@ -349,6 +364,53 @@ def testar_smtp():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+
+# ══ E-MAILS ENVIADOS ══
+EMAILS_SHEET_NAME = os.environ.get("EMAILS_SHEET_NAME", "E-MAILS ENVIADOS")
+EMAILS_COLUMNS = ["Data/Hora", "Remetente", "Destinatário", "Nome Lead", "Assunto", "Corpo", "Template"]
+
+def get_emails_sheet():
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if not creds_json:
+        raise Exception("GOOGLE_CREDENTIALS não configurado")
+    creds_dict = json.loads(creds_json)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    return spreadsheet.worksheet(EMAILS_SHEET_NAME)
+
+@app.route("/emails-enviados", methods=["GET"])
+def get_emails_enviados():
+    try:
+        sheet = get_emails_sheet()
+        all_values = sheet.get_all_values(value_render_option=ValueRenderOption.formatted)
+        if not all_values:
+            return jsonify({"data": [], "total": 0})
+        records = []
+        for idx, row in enumerate(all_values[1:]):
+            if not any(cell.strip() for cell in row):
+                continue
+            while len(row) < len(EMAILS_COLUMNS):
+                row.append("")
+            record = {"_row": idx + 2}
+            for i, col in enumerate(EMAILS_COLUMNS):
+                record[col] = row[i] if i < len(row) else ""
+            records.append(record)
+        # Retorna do mais recente pro mais antigo
+        records.reverse()
+        return jsonify({"data": records, "total": len(records)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/emails-enviados/<int:sheet_row>", methods=["DELETE"])
+def delete_email_enviado(sheet_row):
+    try:
+        sheet = get_emails_sheet()
+        sheet.delete_rows(sheet_row)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
