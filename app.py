@@ -209,24 +209,18 @@ def delete_prospecto(sheet_row):
 def enviar_email():
     """
     Recebe: {
-      conta: {email, nome},   -- ex: contato@efilippi.com.br
+      conta: {email, senha, smtp, porta, nome},
       para: "destinatario@email.com",
       assunto: "...",
       corpo: "...",
       lead_row: 5   (opcional — atualiza status na planilha)
     }
-    Seleciona automaticamente a API key do Resend com base no domínio do remetente.
-    Variáveis de ambiente:
-      RESEND_API_KEY   → chave da conta efilippi.com.br
-      RESEND_API_KEY_2 → chave da conta filippisites.com.br
     """
-    import requests as req
-
-    # Mapeamento domínio → variável de ambiente da API key
-    DOMAIN_KEY_MAP = {
-        "efilippi.com.br":     "RESEND_API_KEY",
-        "filippisites.com.br": "RESEND_API_KEY_2",
-    }
+    import smtplib, ssl
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.header import Header
+    from email.utils import formataddr
 
     try:
         data = request.get_json()
@@ -241,45 +235,47 @@ def enviar_email():
 
         remetente_email = (conta.get("email") or "").strip()
         remetente_nome  = (conta.get("nome")  or remetente_email).strip()
+        senha           = conta.get("senha", "")
+        smtp_host       = (conta.get("smtp") or "").strip()
+        smtp_port       = int(conta.get("porta") or 587)
 
         if not remetente_email:
             return jsonify({"error": "Conta sem e-mail configurado"}), 400
+        if not senha:
+            return jsonify({"error": "Conta sem senha configurada"}), 400
+        if not smtp_host:
+            return jsonify({"error": "Servidor SMTP não configurado"}), 400
         if not para:
             return jsonify({"error": "E-mail do destinatário não informado"}), 400
         if not assunto and not corpo:
             return jsonify({"error": "Assunto e corpo estão vazios"}), 400
 
-        # Seleciona API key pelo domínio do remetente
-        dominio = remetente_email.split("@")[-1].lower()
-        env_var = DOMAIN_KEY_MAP.get(dominio)
-        if not env_var:
-            return jsonify({"error": f"Domínio '{dominio}' não configurado no servidor"}), 400
+        # Monta mensagem
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = str(Header(assunto, "utf-8"))
+        msg["From"]    = formataddr((remetente_nome, remetente_email))
+        msg["To"]      = para
+        msg["X-Mailer"] = "Filippi CRM"
+        msg.attach(MIMEText(corpo, "plain", "utf-8"))
 
-        api_key = os.environ.get(env_var)
-        if not api_key:
-            return jsonify({"error": f"Variável {env_var} não configurada no servidor"}), 500
+        # Envia via SMTP
+        if smtp_port == 465:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ctx, timeout=20) as srv:
+                srv.login(remetente_email, senha)
+                srv.sendmail(remetente_email, [para], msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as srv:
+                srv.ehlo()
+                srv.starttls(context=ssl.create_default_context())
+                srv.ehlo()
+                srv.login(remetente_email, senha)
+                srv.sendmail(remetente_email, [para], msg.as_string())
 
-        # Corpo: converte quebras de linha em <br> para HTML
-        corpo_html = corpo.replace("\n", "<br>")
+        # bloco de sucesso abaixo (não alterar esta linha)
+        resp_success = True
 
-        # Envia via Resend API
-        resp = req.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type":  "application/json",
-            },
-            json={
-                "from":    f"{remetente_nome} <{remetente_email}>",
-                "to":      [para],
-                "subject": assunto,
-                "html":    corpo_html,
-                "text":    corpo,
-            },
-            timeout=20
-        )
-
-        if resp.status_code in (200, 201):
+        if resp_success:
             from datetime import datetime
             warnings = []
 
@@ -309,59 +305,51 @@ def enviar_email():
             if warnings:
                 result["warning"] = " | ".join(warnings)
             return jsonify(result)
-        else:
-            try:
-                err_msg = resp.json().get("message") or resp.text
-            except Exception:
-                err_msg = resp.text
-            return jsonify({"error": f"Resend recusou o envio: {err_msg}"}), 400
-
+    except smtplib.SMTPAuthenticationError:
+        return jsonify({"error": "Usuário ou senha incorretos. Verifique as credenciais."}), 400
+    except smtplib.SMTPConnectError:
+        return jsonify({"error": "Não foi possível conectar ao servidor SMTP."}), 400
+    except smtplib.SMTPRecipientsRefused:
+        return jsonify({"error": "E-mail do destinatário foi recusado pelo servidor."}), 400
+    except smtplib.SMTPSenderRefused:
+        return jsonify({"error": "Remetente recusado. Verifique o e-mail da conta."}), 400
+    except smtplib.SMTPException as e:
+        return jsonify({"error": f"Erro SMTP: {str(e)}"}), 400
+    except OSError as e:
+        return jsonify({"error": f"Erro de conexão: {str(e)}"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/testar-smtp", methods=["POST"])
 def testar_smtp():
-    """
-    Testa se a API key do Resend está configurada e válida para o domínio informado.
-    Recebe: { conta: { email } }
-    """
-    import requests as req
-
-    DOMAIN_KEY_MAP = {
-        "efilippi.com.br":     "RESEND_API_KEY",
-        "filippisites.com.br": "RESEND_API_KEY_2",
-    }
-
+    """Testa conexão SMTP sem enviar e-mail — valida as credenciais."""
+    import smtplib, ssl
     try:
-        data  = request.get_json() or {}
-        conta = data.get("conta", {})
-        email = (conta.get("email") or "").strip()
+        data      = request.get_json() or {}
+        conta     = data.get("conta", {})
+        smtp_host = (conta.get("smtp")  or "").strip()
+        smtp_port = int(conta.get("porta") or 587)
+        email     = (conta.get("email") or "").strip()
+        senha     = conta.get("senha", "")
 
-        if not email:
-            return jsonify({"error": "Preencha o e-mail"}), 400
+        if not all([smtp_host, email, senha]):
+            return jsonify({"error": "Preencha todos os campos"}), 400
 
-        dominio = email.split("@")[-1].lower()
-        env_var = DOMAIN_KEY_MAP.get(dominio)
-        if not env_var:
-            return jsonify({"error": f"Domínio '{dominio}' não configurado no servidor"}), 400
-
-        api_key = os.environ.get(env_var)
-        if not api_key:
-            return jsonify({"error": f"Variável {env_var} não encontrada no servidor"}), 500
-
-        # Valida a key chamando /domains do Resend
-        resp = req.get(
-            "https://api.resend.com/domains",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=10
-        )
-
-        if resp.status_code == 200:
-            return jsonify({"success": True})
+        if smtp_port == 465:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ctx, timeout=10) as srv:
+                srv.login(email, senha)
         else:
-            return jsonify({"error": "API key inválida ou sem permissão"}), 400
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as srv:
+                srv.ehlo()
+                srv.starttls(context=ssl.create_default_context())
+                srv.ehlo()
+                srv.login(email, senha)
 
+        return jsonify({"success": True})
+    except smtplib.SMTPAuthenticationError:
+        return jsonify({"error": "Usuário ou senha incorretos"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
