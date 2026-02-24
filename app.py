@@ -205,6 +205,142 @@ def delete_prospecto(sheet_row):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/enviar-email", methods=["POST"])
+def enviar_email():
+    """
+    Recebe: {
+      conta: {email, senha, smtp, porta, nome},
+      para: "destinatario@email.com",
+      assunto: "...",
+      corpo: "...",
+      lead_row: 5   (opcional — atualiza status na planilha)
+    }
+    """
+    import smtplib
+    import ssl
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.header import Header
+    from email.utils import formataddr
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Dados inválidos"}), 400
+
+        conta   = data.get("conta", {})
+        para    = (data.get("para") or "").strip()
+        assunto = (data.get("assunto") or "").strip()
+        corpo   = (data.get("corpo") or "").strip()
+        lead_row = data.get("lead_row")
+
+        # Validações básicas
+        if not conta.get("email"):
+            return jsonify({"error": "Conta sem e-mail configurado"}), 400
+        if not conta.get("senha"):
+            return jsonify({"error": "Conta sem senha configurada"}), 400
+        if not conta.get("smtp"):
+            return jsonify({"error": "Servidor SMTP não configurado"}), 400
+        if not para:
+            return jsonify({"error": "E-mail do destinatário não informado"}), 400
+        if not assunto and not corpo:
+            return jsonify({"error": "Assunto e corpo estão vazios"}), 400
+
+        smtp_host = conta["smtp"].strip()
+        smtp_port = int(conta.get("porta") or 587)
+        remetente_email = conta["email"].strip()
+        remetente_nome  = (conta.get("nome") or remetente_email).strip()
+        senha = conta["senha"]
+
+        # Monta mensagem
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = str(Header(assunto, "utf-8"))
+        msg["From"]    = formataddr((remetente_nome, remetente_email))
+        msg["To"]      = para
+        msg["X-Mailer"] = "Filippi CRM"
+
+        # Corpo em texto simples (preserva quebras de linha)
+        msg.attach(MIMEText(corpo, "plain", "utf-8"))
+
+        # Envia via SMTP
+        if smtp_port == 465:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ctx, timeout=20) as srv:
+                srv.login(remetente_email, senha)
+                srv.sendmail(remetente_email, [para], msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as srv:
+                srv.ehlo()
+                srv.starttls(context=ssl.create_default_context())
+                srv.ehlo()
+                srv.login(remetente_email, senha)
+                srv.sendmail(remetente_email, [para], msg.as_string())
+
+        # Atualiza status do lead na planilha (se informado)
+        status_warning = None
+        if lead_row:
+            try:
+                sheet = get_sheet()
+                status_col_idx = COLUMNS.index("Status") + 1  # 1-based = coluna H = 8
+                sheet.update_cell(int(lead_row), status_col_idx, "E-mail Enviado")
+            except Exception as e:
+                status_warning = f"E-mail enviado, mas falhou ao atualizar status: {str(e)}"
+
+        result = {"success": True}
+        if status_warning:
+            result["warning"] = status_warning
+        return jsonify(result)
+
+    except smtplib.SMTPAuthenticationError:
+        return jsonify({"error": "Usuário ou senha incorretos. Verifique as credenciais da conta."}), 400
+    except smtplib.SMTPConnectError:
+        return jsonify({"error": "Não foi possível conectar ao servidor SMTP. Verifique o host e a porta."}), 400
+    except smtplib.SMTPRecipientsRefused:
+        return jsonify({"error": "E-mail do destinatário foi recusado pelo servidor."}), 400
+    except smtplib.SMTPSenderRefused:
+        return jsonify({"error": "Remetente recusado. Verifique o e-mail da conta."}), 400
+    except smtplib.SMTPException as e:
+        return jsonify({"error": f"Erro SMTP: {str(e)}"}), 400
+    except OSError as e:
+        return jsonify({"error": f"Erro de conexão: {str(e)}. Verifique o servidor SMTP e a porta."}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/testar-smtp", methods=["POST"])
+def testar_smtp():
+    """Testa conexão SMTP sem enviar e-mail — para validar as credenciais."""
+    import smtplib
+    import ssl
+    try:
+        data  = request.get_json() or {}
+        conta = data.get("conta", {})
+        smtp_host = (conta.get("smtp") or "").strip()
+        smtp_port = int(conta.get("porta") or 587)
+        email     = (conta.get("email") or "").strip()
+        senha     = conta.get("senha", "")
+
+        if not all([smtp_host, email, senha]):
+            return jsonify({"error": "Preencha todos os campos"}), 400
+
+        if smtp_port == 465:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ctx, timeout=10) as srv:
+                srv.login(email, senha)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as srv:
+                srv.ehlo()
+                srv.starttls(context=ssl.create_default_context())
+                srv.ehlo()
+                srv.login(email, senha)
+
+        return jsonify({"success": True})
+    except smtplib.SMTPAuthenticationError:
+        return jsonify({"error": "Usuário ou senha incorretos"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
 
